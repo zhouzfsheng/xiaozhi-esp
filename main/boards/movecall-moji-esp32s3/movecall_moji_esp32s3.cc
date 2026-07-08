@@ -5,6 +5,7 @@
 #include "button.h"
 #include "config.h"
 #include "led/single_led.h"
+#include "mcp_server.h"
 
 #include <esp_log.h>
 #include <esp_efuse_table.h>
@@ -15,6 +16,7 @@
 #include <esp_lcd_gc9a01.h>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 
 #define TAG "MovecallMojiESP32S3"
@@ -51,6 +53,7 @@ private:
     i2c_master_bus_handle_t codec_i2c_bus_;
     Button boot_button_;
     Display* display_;
+    int pwm_duty_percent_[2] = {0, 0};
 
     void InitializeCodecI2c() {
         // Initialize I2C peripheral
@@ -116,12 +119,91 @@ private:
         });
     }
 
+    void InitializePwmOutput() {
+        ledc_timer_config_t timer_config = {};
+        timer_config.speed_mode = LEDC_LOW_SPEED_MODE;
+        timer_config.duty_resolution = LEDC_TIMER_10_BIT;
+        timer_config.timer_num = LEDC_TIMER_1;
+        timer_config.freq_hz = PWM_OUTPUT_FREQUENCY_HZ;
+        timer_config.clk_cfg = LEDC_AUTO_CLK;
+        ESP_ERROR_CHECK(ledc_timer_config(&timer_config));
+
+        ledc_channel_config_t channel_config = {};
+        channel_config.gpio_num = PWM_OUTPUT_GPIO_1;
+        channel_config.speed_mode = LEDC_LOW_SPEED_MODE;
+        channel_config.channel = LEDC_CHANNEL_1;
+        channel_config.intr_type = LEDC_INTR_DISABLE;
+        channel_config.timer_sel = LEDC_TIMER_1;
+        channel_config.duty = 0;
+        channel_config.hpoint = 0;
+        ESP_ERROR_CHECK(ledc_channel_config(&channel_config));
+
+        channel_config.gpio_num = PWM_OUTPUT_GPIO_2;
+        channel_config.channel = LEDC_CHANNEL_2;
+        ESP_ERROR_CHECK(ledc_channel_config(&channel_config));
+    }
+
+    void SetPwmDuty(int channel, int duty_percent) {
+        if (channel < 1 || channel > 2) {
+            ESP_LOGW(TAG, "Invalid PWM channel: %d", channel);
+            return;
+        }
+
+        if (duty_percent < 0) {
+            duty_percent = 0;
+        } else if (duty_percent > 100) {
+            duty_percent = 100;
+        }
+
+        auto ledc_channel = channel == 1 ? LEDC_CHANNEL_1 : LEDC_CHANNEL_2;
+        pwm_duty_percent_[channel - 1] = duty_percent;
+        uint32_t duty = duty_percent * 1023 / 100;
+        ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, ledc_channel, duty));
+        ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, ledc_channel));
+    }
+
+    void InitializeTools() {
+        auto& mcp_server = McpServer::GetInstance();
+        mcp_server.AddTool("self.system.reconfigure_wifi",
+            "End this conversation and enter WiFi configuration mode.\n"
+            "**CAUTION** You must ask the user to confirm this action.",
+            PropertyList(), [this](const PropertyList& properties) {
+                EnterWifiConfigMode();
+                return true;
+            });
+
+        mcp_server.AddTool("self.pwm.set_duty",
+            "Set fan speed by PWM duty. Fan 1 is GPIO38, fan 2 is GPIO39. "
+            "Use this tool when the user says fan 1, fan 2, first fan, second fan, or asks to turn a fan on/off. "
+            "Duty range is 0 to 100 percent; 0 means off, 100 means full speed.",
+            PropertyList({
+                Property("fan", kPropertyTypeInteger, 1, 1, 2),
+                Property("duty", kPropertyTypeInteger, 0, 100)
+            }), [this](const PropertyList& properties) {
+                int channel = properties["fan"].value<int>();
+                int duty = properties["duty"].value<int>();
+                SetPwmDuty(channel, duty);
+                return true;
+            });
+
+        mcp_server.AddTool("self.pwm.get_duty",
+            "Get current fan PWM duty percent. Fan 1 is GPIO38, fan 2 is GPIO39.",
+            PropertyList({
+                Property("fan", kPropertyTypeInteger, 1, 1, 2)
+            }), [this](const PropertyList& properties) {
+                int channel = properties["fan"].value<int>();
+                return pwm_duty_percent_[channel - 1];
+            });
+    }
+
 public:
     MovecallMojiESP32S3() : boot_button_(BOOT_BUTTON_GPIO) {  
         InitializeCodecI2c();
         InitializeSpi();
         InitializeGc9a01Display();
         InitializeButtons();
+        InitializePwmOutput();
+        InitializeTools();
         GetBacklight()->RestoreBrightness();
     }
 
