@@ -3,7 +3,10 @@
     "builds": [
         {
             "name": "movecall-moji-esp32s3",
-            "sdkconfig_append": []
+            "sdkconfig_append": [
+                "CONFIG_USE_AFE_WAKE_WORD=y",
+                "CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y"
+            ]
         }
     ]
 }
